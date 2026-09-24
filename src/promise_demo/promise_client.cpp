@@ -1,15 +1,14 @@
 // promise_client: the std::promise pattern from "C++ Concurrency in Action"
-// (listing 4.10), implemented for real.
+// (listing 4.10), simplified.
 //
-//   * User threads call connection::send_request(). It creates
-//       - a std::promise<std::string> for the reply, stored under a new id
-//       - an outgoing packet holding a std::promise<bool> ("was it sent?")
-//     and returns the futures immediately.
-//   * ONE I/O thread runs process_connections(): it sends queued packets
-//     (fulfilling the "sent" promise) and, for every reply that arrives,
-//     looks up the promise by the reply's id and calls set_value().
+//   * User threads call connection::send_request(). It creates a
+//     std::promise for the reply, stores it under a new id, queues the
+//     request and returns the future immediately.
+//   * ONE I/O thread runs process_connections(): it sends queued requests
+//     and collects the reply frames for each id. When the "END" frame
+//     arrives, it calls set_value() on the promise with all collected frames.
 //
-// Good breakpoints: send_request(), and the two set_value() calls in
+// Good breakpoints: send_request() and the set_value() call in
 // process_connections(). Use Debug > Windows > Threads to see which thread
 // sets the promise and which thread is waiting in future.get().
 
@@ -28,21 +27,21 @@
 #include <unordered_map>
 #include <vector>
 
-struct data_packet {                 // a reply received from the server
+using reply_t = std::vector<std::string>;   // all frames of one reply, last one is "END"
+
+struct data_packet {                 // a frame received from the server
     uint32_t    id;
     std::string payload;
 };
 
 struct outgoing_packet {             // a request waiting to be sent
-    uint32_t           id;
-    std::string        payload;
-    std::promise<bool> promise;      // fulfilled once the bytes are sent
+    uint32_t    id;
+    std::string payload;
 };
 
-struct request_handle {              // what the caller gets back
-    uint32_t                 id;
-    std::future<bool>        sent;
-    std::future<std::string> reply;
+struct pending_request {
+    std::promise<reply_t> promise;
+    reply_t               frames;    // frames received so far (I/O thread only)
 };
 
 class connection {
@@ -53,24 +52,18 @@ public:
     connection& operator=(const connection&) = delete;
 
     // ---- called from any user thread --------------------------------------
-    request_handle send_request(const std::string& payload) {
+    std::future<reply_t> send_request(const std::string& payload) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) throw std::runtime_error("connection is closed");
 
         uint32_t id = next_id_++;
-        request_handle handle;
-        handle.id    = id;
-        handle.reply = pending_[id].get_future();          // promise for the reply
-
-        outgoing_packet packet{id, payload, std::promise<bool>()};
-        handle.sent = packet.promise.get_future();         // promise for "sent"
-        outgoing_.push_back(std::move(packet));
-        return handle;
+        outgoing_.push_back({id, payload});
+        return pending_[id].promise.get_future();
     }
 
     // ---- called only from the I/O thread ------------------------------------
 
-    // True if a complete reply frame is available (reads the socket if needed).
+    // True if a complete frame is available (reads the socket if needed).
     bool has_incoming_data() {
         if (frame_ready()) return true;
         if (closed_ || !wait_readable(sock_, 0)) return false;
@@ -87,14 +80,14 @@ public:
         return packet;
     }
 
-    // The promise waiting for reply `id`. The reference stays valid while
+    // The request waiting for reply `id`. The reference stays valid while
     // other threads add entries (unordered_map never moves its elements).
-    std::promise<std::string>& get_promise(uint32_t id) {
+    pending_request& get_request(uint32_t id) {
         std::lock_guard<std::mutex> lock(mutex_);
         return pending_.at(id);
     }
 
-    void remove_promise(uint32_t id) {
+    void remove_request(uint32_t id) {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_.erase(id);
     }
@@ -104,8 +97,6 @@ public:
         return !closed_ && !outgoing_.empty();
     }
 
-    // Takes the first queued packet. (The book calls this top_of_outgoing_queue;
-    // it must also remove it, because std::promise can only be moved, not copied.)
     outgoing_packet pop_outgoing() {
         std::lock_guard<std::mutex> lock(mutex_);
         outgoing_packet packet = std::move(outgoing_.front());
@@ -129,13 +120,12 @@ private:
     }
 
     // Connection broken: every waiting future gets an exception instead of
-    // hanging forever (otherwise get() would block, or throw broken_promise).
+    // hanging forever.
     void close_with_error(const char* what) {
         std::lock_guard<std::mutex> lock(mutex_);
         closed_ = true;
         auto error = std::make_exception_ptr(std::runtime_error(what));
-        for (auto& entry : pending_) entry.second.set_exception(error);
-        for (auto& packet : outgoing_) packet.promise.set_exception(error);
+        for (auto& entry : pending_) entry.second.promise.set_exception(error);
         pending_.clear();
         outgoing_.clear();
     }
@@ -144,7 +134,7 @@ private:
     std::string read_buffer_;                        // I/O thread only
 
     std::mutex mutex_;                               // guards everything below
-    std::unordered_map<uint32_t, std::promise<std::string>> pending_;
+    std::unordered_map<uint32_t, pending_request> pending_;
     std::deque<outgoing_packet> outgoing_;
     uint32_t next_id_ = 1;
     bool     closed_  = false;
@@ -161,22 +151,24 @@ bool done(connection_set& connections) {
     return true;                                     // all connections closed
 }
 
-// The loop from the book, almost line by line.
+// The loop from the book, adapted to multi-frame replies ending with "END".
 void process_connections(connection_set& connections) {
     while (!done(connections)) {
         bool did_work = false;
         for (auto& connection : connections) {
             if (connection->has_incoming_data()) {
                 data_packet data = connection->incoming();
-                std::promise<std::string>& p = connection->get_promise(data.id);
-                p.set_value(data.payload);           // wakes whoever waits on reply
-                connection->remove_promise(data.id);
+                pending_request& request = connection->get_request(data.id);
+                request.frames.push_back(data.payload);
+                if (data.payload == "END") {
+                    request.promise.set_value(std::move(request.frames));   // wakes the waiter
+                    connection->remove_request(data.id);
+                }
                 did_work = true;
             }
             if (connection->has_outgoing_data()) {
                 outgoing_packet data = connection->pop_outgoing();
                 connection->send(data.id, data.payload);
-                data.promise.set_value(true);        // wakes whoever waits on "sent"
                 did_work = true;
             }
         }
@@ -213,46 +205,22 @@ int main() {
 
     std::thread io_thread(process_connections, std::ref(connections));
 
-    // Send several requests at once. Replies to "delay" requests come back
-    // later, so they arrive in a different order than they were sent.
-    const std::vector<std::string> commands = {
-        "delay:900 slow reply",
-        "upper:hello promise",
-        "add:2,40",
-        "delay:300 medium reply",
-        "unknown command",
-    };
+    const std::vector<std::string> messages = {"hello", "promise", "world"};
 
-    auto start = std::chrono::steady_clock::now();
-    std::vector<request_handle> requests;
-    for (const auto& cmd : commands) {
-        requests.push_back(conn.send_request(cmd));
-        std::cout << "queued  #" << requests.back().id << " '" << cmd << "'\n";
+    std::vector<std::future<reply_t>> replies;
+    for (const auto& msg : messages) {
+        replies.push_back(conn.send_request(msg));
+        std::cout << "sent '" << msg << "'\n";
     }
 
-    // The "sent" futures complete as soon as the I/O thread has written each request.
-    for (auto& r : requests) r.sent.get();
-    std::cout << "all requests sent\n\n";
-
-    // Print replies in the order they ARRIVE (poll all futures, like wait_any).
-    std::size_t remaining = requests.size();
-    while (remaining > 0) {
-        for (std::size_t i = 0; i < requests.size(); ++i) {
-            auto& r = requests[i];
-            if (r.reply.valid() &&
-                r.reply.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - start).count();
-                try {
-                    std::string value = r.reply.get();   // rethrows if set_exception was used
-                    std::cout << "reply   #" << r.id << " after " << ms << " ms: '"
-                              << value << "'  (for '" << commands[i] << "')\n";
-                } catch (const std::exception& e) {
-                    std::cout << "request #" << r.id << " failed after " << ms << " ms: "
-                              << e.what() << '\n';
-                }
-                --remaining;
-            }
+    for (std::size_t i = 0; i < replies.size(); ++i) {
+        try {
+            reply_t frames = replies[i].get();       // blocks until "END" arrives
+            std::cout << "reply for '" << messages[i] << "':";
+            for (const auto& f : frames) std::cout << " '" << f << "'";
+            std::cout << '\n';
+        } catch (const std::exception& e) {
+            std::cout << "request '" << messages[i] << "' failed: " << e.what() << '\n';
         }
     }
 
