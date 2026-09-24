@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------
+# Visual Studio CMake build folder (from CMakePresets.json)
+out/
+
+# Other common build folders
+build/
+build-*/
+cmake-build-*/
+
+# ---------------------------------------------------------------
+# Visual Studio
+# ---------------------------------------------------------------
+# Per-user IDE state (IntelliSense database, open files, breakpoints)
+.vs/
+
+# Per-user project settings
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Personal CMake presets (the shared CMakePresets.json IS committed)
+CMakeUserPresets.json
+
+# Older Visual Studio CMake settings, if generated
+CMakeSettings.json
+
+# ---------------------------------------------------------------
+# CMake files generated during in-source builds
+# ---------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+_deps/
+
+# ---------------------------------------------------------------
+# Compiled files
+# ---------------------------------------------------------------
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.ipch
+
+# ---------------------------------------------------------------
+# Other editors and OS files
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
