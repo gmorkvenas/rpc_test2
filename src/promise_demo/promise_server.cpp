@@ -105,6 +105,9 @@ int main() {
         //   arg 3: sockets to watch for writing   - not used
         //   arg 4: sockets to watch for errors    - not used
         //   arg 5: timeout; nullptr = wait forever (no other work to do)
+
+        //pass readable to which ones you expecting;
+        // return readable with socket that has generated event
         print_set("before select", readable, listener, connections);
         ::select(select_nfds(highest), &readable, nullptr, nullptr, nullptr);
         print_set("after select ", readable, listener, connections);
@@ -121,6 +124,10 @@ int main() {
                 connections.push_back({s, {}, description});
                 std::cout << "client connected: " << description << '\n';
             }
+        }
+        else
+        {
+            std::cout << "listener is not in readable " <<'\n';
         }
 
         // 3. Incoming data on each connection: answer with echo + "END"

@@ -37,3 +37,14 @@ if(WIN32)
     target_link_libraries(promise_server PRIVATE ws2_32)
     target_link_libraries(promise_client PRIVATE ws2_32)
 endif()
+
+# Same server on Asio (the standalone copy bundled with rpclib).
+add_executable(promise_server_asio src/promise_demo/promise_server_asio.cpp)
+target_include_directories(promise_server_asio PRIVATE
+    $<TARGET_PROPERTY:rpc,SOURCE_DIR>/dependencies/include)
+target_compile_definitions(promise_server_asio PRIVATE ASIO_STANDALONE)
+target_link_libraries(promise_server_asio PRIVATE Threads::Threads)
+if(WIN32)
+    target_compile_definitions(promise_server_asio PRIVATE _WIN32_WINNT=0x0A00)   # Windows 10+
+    target_link_libraries(promise_server_asio PRIVATE ws2_32 mswsock)
+endif()
